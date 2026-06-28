@@ -33,10 +33,20 @@ class Region(NamedTuple):
     def height(self) -> int:
         return self.y2 - self.y1
 
-    def padded(self, pct: float = 0.20, screen_w: int = 1920, screen_h: int = 1080) -> "Region":
-        """Expand region by pct on all sides, clamped to screen bounds."""
-        pad_x = int(self.width * pct)
-        pad_y = int(self.height * pct)
+    def padded(
+        self,
+        pct: float = 0.20,
+        min_size: int = 200,
+        screen_w: int = 1920,
+        screen_h: int = 1080,
+    ) -> "Region":
+        """Expand region by pct on all sides, clamped to screen bounds.
+
+        A minimum absolute crop size (min_size) is enforced so that tiny icons
+        still produce a large enough crop for the VLM to reason about in Stage 2.
+        """
+        pad_x = max(int(self.width * pct), (min_size - self.width) // 2)
+        pad_y = max(int(self.height * pct), (min_size - self.height) // 2)
         return Region(
             x1=max(0, self.x1 - pad_x),
             y1=max(0, self.y1 - pad_y),
