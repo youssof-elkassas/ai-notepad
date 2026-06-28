@@ -26,7 +26,7 @@ _DIALOG_WAIT = 0.8
 _OUTPUT_DIR = Path.home() / "Desktop" / "tjm-project"
 
 
-def _wait_for_notepad(timeout: float = 10.0) -> None:
+def _wait_for_notepad(timeout: float = 5.0) -> None:
     """Block until a Notepad window appears or timeout is reached."""
     deadline = time.time() + timeout
     while time.time() < deadline:

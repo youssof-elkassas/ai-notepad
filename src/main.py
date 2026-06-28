@@ -28,13 +28,14 @@ from src.api.posts import fetch_posts
 from src.automation.mouse import hotkey, press
 from src.automation.notepad import close_notepad, open_notepad, save_file, type_content
 from src.automation.screen import capture_desktop, save_screenshot
-from src.grounding.screenseeker import detect_popup, ground_cached
+from src.grounding.screenseeker import detect_popup, ground_cached, invalidate_cache
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 _SCREENSHOTS_DIR = Path("screenshots")
 _NOTEPAD_QUERY = "Notepad desktop shortcut icon"
+_MAX_LAUNCH_ATTEMPTS = 3
 
 
 def _dismiss_popup(screenshot) -> None:
@@ -108,9 +109,44 @@ def main() -> None:
 
         logger.info("Notepad icon grounded at (%d, %d)", x, y)
 
-        # ── 2d–2g. Open → Type → Save → Close ─────────────────────
+        # ── 2d. Open Notepad (re-ground if click missed) ───────────
+        launched = False
+        for launch_attempt in range(1, _MAX_LAUNCH_ATTEMPTS + 1):
+            try:
+                open_notepad(x, y)
+                launched = True
+                break
+            except TimeoutError:
+                logger.warning(
+                    "Notepad did not open (attempt %d/%d) — "
+                    "click likely missed. Re-grounding…",
+                    launch_attempt,
+                    _MAX_LAUNCH_ATTEMPTS,
+                )
+                invalidate_cache(_NOTEPAD_QUERY)
+                pyautogui.hotkey("win", "d")
+                time.sleep(1.0)
+                screenshot = capture_desktop()
+                try:
+                    x, y = ground_cached(
+                        query=_NOTEPAD_QUERY,
+                        screenshot=screenshot,
+                        save_annotated_to=annotated_path,
+                    )
+                except RuntimeError as exc:
+                    logger.error("Re-grounding failed: %s — skipping post.", exc)
+                    break
+                logger.info("Re-grounded Notepad icon at (%d, %d)", x, y)
+
+        if not launched:
+            logger.error(
+                "Could not open Notepad after %d attempts — skipping post.",
+                _MAX_LAUNCH_ATTEMPTS,
+            )
+            continue
+
+        # ── 2e–2g. Type → Save → Close ─────────────────────────────
         try:
-            open_notepad(x, y)
             type_content(title, body)
             save_file(post_id)
             close_notepad()
