@@ -52,7 +52,15 @@ Rules:
 
 _STAGE2_PROMPT = """You are a GUI grounding agent analyzing a cropped screenshot region.
 
-Your task: find the exact center pixel of: "{query}"
+Your task: pinpoint the exact center pixel of the element described as: "{query}"
+
+Visual description of the target element:
+- It is a small desktop shortcut icon (approximately 32-48 pixels wide).
+- The Notepad icon looks like a small notepad or document with horizontal lines, \
+typically blue/white or a pencil-and-paper icon on a Windows desktop.
+- It has a text label underneath it, usually reading "Notepad".
+- It may be surrounded by other desktop icons — pick only the one that best matches \
+the description.
 
 The image you are analyzing is exactly {width} pixels wide and {height} pixels tall.
 
@@ -65,7 +73,9 @@ within THIS image — not the original full screen.
 Rules:
 - x must be an integer between 0 and {width_max} (inclusive).
 - y must be an integer between 0 and {height_max} (inclusive).
-- If not found, return {{"x": -1, "y": -1}}
+- Always return your best estimate of the element's center, even if you are not \
+100% certain. Only return {{"x": -1, "y": -1}} if there is absolutely no desktop \
+icon visible anywhere in this image.
 - Return ONLY the JSON, no explanation."""
 
 _POPUP_PROMPT = """You are a GUI agent. Analyze this screenshot.

@@ -36,7 +36,7 @@ class Region(NamedTuple):
     def padded(
         self,
         pct: float = 0.20,
-        min_size: int = 200,
+        min_size: int = 300,
         screen_w: int = 1920,
         screen_h: int = 1080,
     ) -> "Region":
