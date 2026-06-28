@@ -172,6 +172,10 @@ def save_file(post_id: int) -> None:
 
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    if full_path.exists():
+        logger.info("Deleting existing file: %s", full_path)
+        full_path.unlink()
+
     hotkey("ctrl", "shift", "s")
     time.sleep(_DIALOG_WAIT)
 
