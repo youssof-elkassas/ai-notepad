@@ -5,8 +5,11 @@ Inspired by ScreenSpot-Pro / ScreenSeekeR (arXiv:2504.07981):
   Stage 1 (Planner):  Full screenshot → MLLM → coarse bounding box
   Stage 2 (Grounder): Cropped region  → MLLM → precise center (x, y)
 
-The system is provider-agnostic: set LLM_PROVIDER=gemini (default, free)
-or LLM_PROVIDER=openai (paid fallback) in .env.
+Stage 1 uses a quadrant-scan fallback: if the first full-screenshot attempt
+fails in Stage 2 (wrong region predicted), subsequent retries divide the
+screen into quadrants and check each one individually. This gives the VLM a
+960×540 image instead of 1920×1080, making each tiny desktop icon roughly
+twice as large and far easier to locate reliably.
 """
 
 from __future__ import annotations
@@ -35,85 +38,55 @@ _OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 _MAX_RETRIES = int(os.getenv("MAX_GROUNDING_RETRIES", "3"))
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
-_STAGE1_PROMPT = """You are a GUI grounding agent analyzing a full Windows desktop screenshot \
-(1920×1080 pixels).
+
+_STAGE1_PROMPT = """You are a GUI grounding agent analyzing a Windows desktop screenshot.
 
 Your task: locate the UI element described as: "{query}"
 
 Visual description of the target:
 - A small Windows desktop shortcut icon, approximately 32-48 pixels wide.
-- The Notepad icon shows a notepad or document with horizontal text lines, typically \
-in blue/white colors or a pencil-and-paper illustration.
-- It has a short text label directly underneath it, reading "Notepad".
-- It sits on the desktop surface (NOT inside the taskbar at the very bottom of the screen).
-- It could be ANYWHERE on the desktop: top-left corner, top-right corner, bottom-left, \
-bottom-right, or center — do not assume any particular location.
+- The Notepad icon shows a notepad or document with horizontal text lines, \
+typically in blue/white colors or a pencil-and-paper illustration.
+- It has a short text label directly underneath it reading "Notepad".
+- It sits on the desktop surface (NOT inside the taskbar at the very bottom).
+- It could be ANYWHERE in the image — do not assume any particular location.
 
 Instructions:
-- Carefully scan the ENTIRE desktop, including all four corners and edges, before answering.
-- Look for small icon-sized elements (30-60 pixels) with a label underneath.
-- Do NOT guess or default to the center of the screen if you are unsure.
-- If you genuinely cannot find the element anywhere, return all zeros.
+- Scan the ENTIRE image carefully before answering, including corners and edges.
+- Look specifically for a small icon-sized element (~30-60 px) with a label underneath.
+- This image is {width}×{height} pixels. Coordinates must be within these bounds.
+- If you cannot find the element, return all zeros.
 
-Return ONLY valid JSON with this exact structure:
+Return ONLY valid JSON:
 {{"x1": <int>, "y1": <int>, "x2": <int>, "y2": <int>}}
 
-Where x1,y1 is the top-left corner and x2,y2 is the bottom-right corner of the bounding \
-box (pixel coordinates: x in 0-1920, y in 0-1080).
-
-Rules:
-- Return ONLY the JSON, no explanation.
-- If you cannot find the element, return {{"x1": 0, "y1": 0, "x2": 0, "y2": 0}}"""
+Where x1,y1 is the top-left and x2,y2 is the bottom-right of the bounding box, \
+in pixels within THIS image.
+If not found: {{"x1": 0, "y1": 0, "x2": 0, "y2": 0}}
+Return ONLY the JSON, no explanation."""
 
 _STAGE2_PROMPT = """You are a GUI grounding agent analyzing a cropped screenshot region.
 
-Your task: pinpoint the exact center pixel of the element described as: "{query}"
-
-Visual description of the target element:
-- It is a small desktop shortcut icon (approximately 32-48 pixels wide).
-- The Notepad icon looks like a small notepad or document with horizontal lines, \
-typically blue/white or a pencil-and-paper icon on a Windows desktop.
-- It has a text label underneath it, usually reading "Notepad".
-- It may be surrounded by other desktop icons — pick only the one that best matches \
-the description.
-
-The image you are analyzing is exactly {width} pixels wide and {height} pixels tall.
-
-Return ONLY valid JSON with this exact structure:
-{{"x": <int>, "y": <int>}}
-
-Where x is a pixel column (0 to {width_max}) and y is a pixel row (0 to {height_max}) \
-within THIS image — not the original full screen.
-
-Rules:
-- x must be an integer between 0 and {width_max} (inclusive).
-- y must be an integer between 0 and {height_max} (inclusive).
-- Always return your best estimate of the element's center, even if you are not \
-100% certain. Only return {{"x": -1, "y": -1}} if there is absolutely no desktop \
-icon visible anywhere in this image.
-- Return ONLY the JSON, no explanation."""
-
-_DIRECT_PROMPT = """You are a GUI grounding agent. Look carefully at this full Windows desktop \
-screenshot (1920×1080 pixels).
-
-Find and return the exact center pixel of: "{query}"
+Your task: pinpoint the exact center pixel of: "{query}"
 
 Visual description:
-- A small Windows desktop shortcut icon (32-48 pixels wide).
-- The Notepad icon shows a notepad/document with horizontal lines, typically blue/white or \
-a pencil-and-paper illustration.
-- It has a text label underneath reading "Notepad".
-- It is on the desktop surface — NOT in the taskbar at the bottom of the screen.
-- It can be anywhere: top-left, top-right, bottom-left, bottom-right, or center.
+- A small Windows desktop shortcut icon (~32-48 px wide).
+- The Notepad icon: a notepad or document with horizontal lines, blue/white or \
+pencil-and-paper style, with a text label "Notepad" underneath.
+- There may be other icons nearby — pick only the one that best matches.
 
-Scan every corner and edge of the screen carefully.
+This image is exactly {width}×{height} pixels.
 
 Return ONLY valid JSON:
 {{"x": <int>, "y": <int>}}
 
-Where x (0-1920) and y (0-1080) are the center pixel of the element in the full screenshot.
-Only return {{"x": -1, "y": -1}} if the element is completely absent.
-Return ONLY the JSON, no explanation."""
+Where x (0 to {width_max}) and y (0 to {height_max}) are the center pixel within \
+THIS image, not the original screen.
+
+Rules:
+- Return your best estimate even if not 100% certain.
+- Only return {{"x": -1, "y": -1}} if NO desktop icon is visible anywhere in the image.
+- Return ONLY the JSON, no explanation."""
 
 _POPUP_PROMPT = """You are a GUI agent. Analyze this screenshot.
 
@@ -192,42 +165,84 @@ def _call_vlm(prompt: str, img: Image.Image) -> str:
 def _parse_json(text: str) -> dict:
     """Extract and parse JSON from VLM response, handling markdown fences."""
     text = text.strip()
-    # Strip markdown code fences if present
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
     return json.loads(text)
 
 
-# ── Core grounding ────────────────────────────────────────────────────────────
+# ── Stage 1: coarse localization ──────────────────────────────────────────────
 
-def _stage1_coarse(screenshot: Image.Image, query: str) -> Optional[Region]:
+def _query_region_for_bbox(img: Image.Image, query: str, offset_x: int = 0, offset_y: int = 0) -> Optional[Region]:
     """
-    Stage 1 — Planner: ask VLM for a coarse bounding box on the full screenshot.
-    Returns a Region or None if the element was not found / response invalid.
+    Ask the VLM for a bounding box within `img`.
+    If found, maps the result back to full-screen coordinates using offset_x/offset_y.
+    Returns a Region or None.
     """
-    prompt = _STAGE1_PROMPT.format(query=query)
-    logger.info("[Stage 1] Sending full screenshot to VLM for: %r", query)
-
-    raw = _call_vlm(prompt, screenshot)
+    prompt = _STAGE1_PROMPT.format(query=query, width=img.width, height=img.height)
+    raw = _call_vlm(prompt, img)
     logger.debug("[Stage 1] Raw response: %s", raw)
 
     data = _parse_json(raw)
     x1, y1, x2, y2 = data["x1"], data["y1"], data["x2"], data["y2"]
 
     if x1 == 0 and y1 == 0 and x2 == 0 and y2 == 0:
-        logger.warning("[Stage 1] VLM reported element not found.")
         return None
 
-    w, h = screenshot.size
-    region = Region(
-        x1=max(0, x1),
-        y1=max(0, y1),
-        x2=min(w, x2),
-        y2=min(h, y2),
+    return Region(
+        x1=max(0, offset_x + x1),
+        y1=max(0, offset_y + y1),
+        x2=min(offset_x + img.width, offset_x + x2),
+        y2=min(offset_y + img.height, offset_y + y2),
     )
-    logger.info("[Stage 1] Coarse region: %s", region)
+
+
+def _stage1_full(screenshot: Image.Image, query: str) -> Optional[Region]:
+    """Stage 1 on the complete screenshot."""
+    logger.info("[Stage 1] Sending full %dx%d screenshot to VLM for: %r",
+                screenshot.width, screenshot.height, query)
+    region = _query_region_for_bbox(screenshot, query)
+    if region:
+        logger.info("[Stage 1] Coarse region: %s", region)
+    else:
+        logger.warning("[Stage 1] Element not found in full screenshot.")
     return region
 
+
+def _stage1_quadrant_scan(screenshot: Image.Image, query: str) -> Optional[Region]:
+    """
+    Divide the screen into 4 quadrants and scan each one individually.
+
+    Each quadrant is 960×540 — the target icon is effectively 2× larger relative
+    to the image, giving the VLM a much better chance of identifying it correctly.
+    Stops and returns as soon as any quadrant yields a positive result.
+    """
+    w, h = screenshot.width, screenshot.height
+    hw, hh = w // 2, h // 2
+
+    quadrants = [
+        (0,  0,  hw, hh, "top-left"),
+        (hw, 0,  w,  hh, "top-right"),
+        (0,  hh, hw, h,  "bottom-left"),
+        (hw, hh, w,  h,  "bottom-right"),
+    ]
+
+    for (qx1, qy1, qx2, qy2, name) in quadrants:
+        quad_img = screenshot.crop((qx1, qy1, qx2, qy2))
+        logger.info("[Stage 1 Scan] Checking %s quadrant (%dx%d) for: %r",
+                    name, quad_img.width, quad_img.height, query)
+
+        region = _query_region_for_bbox(quad_img, query, offset_x=qx1, offset_y=qy1)
+        if region is not None:
+            logger.info("[Stage 1 Scan] Found in %s quadrant: %s", name, region)
+            return region
+
+        logger.debug("[Stage 1 Scan] Not found in %s quadrant.", name)
+
+    logger.warning("[Stage 1 Scan] Element not found in any quadrant.")
+    return None
+
+
+# ── Stage 2: fine localization ────────────────────────────────────────────────
 
 def _stage2_fine(
     screenshot: Image.Image,
@@ -236,7 +251,8 @@ def _stage2_fine(
 ) -> Optional[tuple[int, int]]:
     """
     Stage 2 — Grounder: crop to the Stage 1 region and pinpoint the exact center.
-    Returns (screen_x, screen_y) or None if not found.
+    Returns (screen_x, screen_y) or None if not found (caller should retry with
+    a different Stage 1 strategy).
     """
     padded = region.padded(pct=0.20, screen_w=screenshot.width, screen_h=screenshot.height)
     crop = crop_region(screenshot, padded)
@@ -257,41 +273,14 @@ def _stage2_fine(
     lx, ly = data["x"], data["y"]
 
     if lx == -1 and ly == -1:
-        # Stage 2 couldn't find the element in the crop — Stage 1 may have pointed
-        # to the wrong region. Try a direct single-stage query on the full screenshot.
-        logger.warning(
-            "[Stage 2] VLM returned no center — trying direct full-screenshot query."
-        )
-        direct_prompt = _DIRECT_PROMPT.format(query=query)
-        direct_raw = _call_vlm(direct_prompt, screenshot)
-        logger.debug("[Direct] Raw response: %s", direct_raw)
-        direct_data = _parse_json(direct_raw)
-        dx, dy = direct_data["x"], direct_data["y"]
+        logger.warning("[Stage 2] VLM reported element not found in crop.")
+        return None
 
-        if dx != -1 and dy != -1:
-            # Apply same normalization check for 0-1000 scale
-            if dx > screenshot.width or dy > screenshot.height:
-                dx = int(dx / 1000 * screenshot.width)
-                dy = int(dy / 1000 * screenshot.height)
-            logger.info("[Direct] Found element at screen=(%d,%d)", dx, dy)
-            return dx, dy
-
-        # Last resort: use Stage 1 box center (better than failing entirely)
-        sx = (region.x1 + region.x2) // 2
-        sy = (region.y1 + region.y2) // 2
-        logger.warning(
-            "[Direct] Also failed — falling back to Stage 1 box center: screen=(%d,%d)",
-            sx, sy,
-        )
-        return sx, sy
-
-    # Gemini sometimes returns coordinates on a 0-1000 normalized scale instead of
-    # pixel offsets. Detect this by checking if either value exceeds the crop bounds,
-    # then rescale back to pixels.
+    # Gemini sometimes returns coordinates on a 0-1000 normalized scale.
+    # Detect and rescale if the value exceeds the crop dimension.
     if lx > crop.width or ly > crop.height:
         logger.debug(
-            "[Stage 2] Normalizing out-of-bounds response (%d,%d) from 0-1000 scale "
-            "to %dx%d crop pixels.",
+            "[Stage 2] Normalizing out-of-bounds (%d,%d) from 0-1000 scale to %dx%d px.",
             lx, ly, crop.width, crop.height,
         )
         lx = int(lx / 1000 * crop.width)
@@ -312,11 +301,16 @@ def ground(
     """
     Locate a UI element on screen using two-stage cascaded VLM grounding.
 
+    Retry strategy:
+      Attempt 1 — Stage 1 on full screenshot → Stage 2 on crop
+      Attempt 2 — Stage 1 quadrant scan      → Stage 2 on crop
+      Attempt 3 — Stage 1 quadrant scan      → Stage 2 on crop
+                  (last resort: Stage 1 box center if Stage 2 returns None)
+
     Args:
         query:              Plain-English description of the target element.
         screenshot:         Full-screen PIL Image.
-        save_annotated_to:  If provided, save an annotated screenshot (bounding
-                            box + crosshair) to this Path after successful grounding.
+        save_annotated_to:  If provided, save an annotated screenshot to this Path.
 
     Returns:
         (x, y) screen coordinates of the element center.
@@ -327,21 +321,41 @@ def ground(
     from src.grounding.annotator import save_annotated
 
     last_exc: Optional[Exception] = None
+    last_region: Optional[Region] = None
 
     for attempt in range(1, _MAX_RETRIES + 1):
         logger.info("Grounding attempt %d/%d for: %r", attempt, _MAX_RETRIES, query)
         try:
-            region = _stage1_coarse(screenshot, query)
+            # Stage 1: full screenshot on first attempt, quadrant scan on retries.
+            if attempt == 1:
+                region = _stage1_full(screenshot, query)
+            else:
+                region = _stage1_quadrant_scan(screenshot, query)
+
             if region is None:
                 raise RuntimeError("Stage 1 returned no region.")
 
+            last_region = region
+
+            # Stage 2: zoom into the Stage 1 region for precise center.
             center = _stage2_fine(screenshot, region, query)
+
+            # Last attempt: if Stage 2 still fails, fall back to Stage 1 box center.
+            if center is None and attempt == _MAX_RETRIES:
+                sx = (region.x1 + region.x2) // 2
+                sy = (region.y1 + region.y2) // 2
+                logger.warning(
+                    "[Stage 2] Last attempt — using Stage 1 box center: screen=(%d,%d)", sx, sy
+                )
+                center = (sx, sy)
+
             if center is None:
                 raise RuntimeError("Stage 2 returned no center.")
 
-            # Sanity-check: coordinates must be within screen bounds
             sx, sy = center
-            if not (0 <= sx <= screenshot.width and 0 <= sy <= screenshot.height):
+
+            # Sanity-check: coordinates must be within screen bounds.
+            if not (0 <= sx < screenshot.width and 0 <= sy < screenshot.height):
                 raise ValueError(
                     f"Grounded coordinates ({sx},{sy}) out of screen bounds "
                     f"({screenshot.width}x{screenshot.height})."
@@ -349,11 +363,10 @@ def ground(
 
             logger.info("Grounding SUCCESS: %r → screen=(%d,%d)", query, sx, sy)
 
-            # Save annotated screenshot if requested
             if save_annotated_to is not None:
                 save_annotated(
                     img=screenshot,
-                    region=region,
+                    region=last_region,
                     center=(sx, sy),
                     label=query,
                     path=save_annotated_to,
@@ -364,13 +377,12 @@ def ground(
 
         except Exception as exc:
             last_exc = exc
+            delay = 2 ** attempt
             logger.warning(
                 "Grounding attempt %d failed: %s. Retrying in %.1fs…",
-                attempt,
-                exc,
-                2 ** attempt,
+                attempt, exc, delay,
             )
-            time.sleep(2 ** attempt)
+            time.sleep(delay)
 
     raise RuntimeError(
         f"Grounding failed for {query!r} after {_MAX_RETRIES} attempts. "
@@ -382,17 +394,15 @@ def detect_popup(screenshot: Image.Image) -> dict:
     """
     Ask the VLM whether a blocking dialog/popup is visible.
 
-    Returns a dict:
-        {
-            "has_popup": bool,
-            "description": str,
-            "dismiss_key": str   # e.g. "Enter", "Escape", "Tab+Enter", "none"
-        }
+    Returns a dict with keys: has_popup (bool), description (str), dismiss_key (str).
     """
     logger.info("Checking for popup / blocking dialog…")
     raw = _call_vlm(_POPUP_PROMPT, screenshot)
     logger.debug("Popup check response: %s", raw)
     result = _parse_json(raw)
     if result.get("has_popup"):
-        logger.warning("Popup detected: %s (dismiss: %s)", result.get("description"), result.get("dismiss_key"))
+        logger.warning(
+            "Popup detected: %s (dismiss: %s)",
+            result.get("description"), result.get("dismiss_key"),
+        )
     return result
