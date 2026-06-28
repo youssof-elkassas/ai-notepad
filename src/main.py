@@ -28,7 +28,7 @@ from src.api.posts import fetch_posts
 from src.automation.mouse import hotkey, press
 from src.automation.notepad import close_notepad, open_notepad, save_file, type_content
 from src.automation.screen import capture_desktop, save_screenshot
-from src.grounding.screenseeker import detect_popup, ground
+from src.grounding.screenseeker import detect_popup, ground_cached
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -97,7 +97,7 @@ def main() -> None:
         # ── 2c. Ground the Notepad icon ────────────────────────────
         annotated_path = _SCREENSHOTS_DIR / f"grounded_post_{post_id:02d}.png"
         try:
-            x, y = ground(
+            x, y = ground_cached(
                 query=_NOTEPAD_QUERY,
                 screenshot=screenshot,
                 save_annotated_to=annotated_path,
