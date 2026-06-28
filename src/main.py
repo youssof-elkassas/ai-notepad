@@ -28,7 +28,12 @@ from src.api.posts import fetch_posts
 from src.automation.mouse import hotkey, press
 from src.automation.notepad import close_notepad, open_notepad, save_file, type_content
 from src.automation.screen import capture_desktop, save_screenshot
-from src.grounding.screenseeker import detect_popup, ground_cached, invalidate_cache
+from src.grounding.screenseeker import (
+    detect_popup,
+    get_cached_coords,
+    ground_and_cache,
+    invalidate_cache,
+)
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -95,48 +100,46 @@ def main() -> None:
         # ── 2b. Dismiss any blocking popup ─────────────────────────
         _dismiss_popup(screenshot)
 
-        # ── 2c. Ground the Notepad icon ────────────────────────────
+        # ── 2c–2d. Launch Notepad (cached coords first, ground on failure) ──
         annotated_path = _SCREENSHOTS_DIR / f"grounded_post_{post_id:02d}.png"
-        try:
-            x, y = ground_cached(
-                query=_NOTEPAD_QUERY,
-                screenshot=screenshot,
-                save_annotated_to=annotated_path,
-            )
-        except RuntimeError as exc:
-            logger.error("Grounding failed for post %d: %s — skipping.", post_id, exc)
-            continue
-
-        logger.info("Notepad icon grounded at (%d, %d)", x, y)
-
-        # ── 2d. Open Notepad (re-ground if click missed) ───────────
         launched = False
-        for launch_attempt in range(1, _MAX_LAUNCH_ATTEMPTS + 1):
+        cached = get_cached_coords(_NOTEPAD_QUERY)
+
+        if cached is not None:
+            x, y = cached
+            logger.info("Cache HIT — trying cached coords (%d, %d)", x, y)
             try:
                 open_notepad(x, y)
                 launched = True
-                break
             except TimeoutError:
-                logger.warning(
-                    "Notepad did not open (attempt %d/%d) — "
-                    "click likely missed. Re-grounding…",
-                    launch_attempt,
-                    _MAX_LAUNCH_ATTEMPTS,
-                )
+                logger.warning("Cached coords did not open Notepad — re-grounding…")
                 invalidate_cache(_NOTEPAD_QUERY)
-                pyautogui.hotkey("win", "d")
-                time.sleep(1.0)
-                screenshot = capture_desktop()
+
+        if not launched:
+            for launch_attempt in range(1, _MAX_LAUNCH_ATTEMPTS + 1):
                 try:
-                    x, y = ground_cached(
+                    x, y = ground_and_cache(
                         query=_NOTEPAD_QUERY,
                         screenshot=screenshot,
                         save_annotated_to=annotated_path,
                     )
-                except RuntimeError as exc:
-                    logger.error("Re-grounding failed: %s — skipping post.", exc)
+                    logger.info("Notepad icon grounded at (%d, %d)", x, y)
+                    open_notepad(x, y)
+                    launched = True
                     break
-                logger.info("Re-grounded Notepad icon at (%d, %d)", x, y)
+                except TimeoutError:
+                    logger.warning(
+                        "Notepad did not open (attempt %d/%d) — re-grounding…",
+                        launch_attempt,
+                        _MAX_LAUNCH_ATTEMPTS,
+                    )
+                    invalidate_cache(_NOTEPAD_QUERY)
+                    pyautogui.hotkey("win", "d")
+                    time.sleep(1.0)
+                    screenshot = capture_desktop()
+                except RuntimeError as exc:
+                    logger.error("Grounding failed: %s — skipping post.", exc)
+                    break
 
         if not launched:
             logger.error(

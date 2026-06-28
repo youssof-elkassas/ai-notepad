@@ -38,10 +38,7 @@ _OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 _MAX_RETRIES = int(os.getenv("MAX_GROUNDING_RETRIES", "3"))
 
 # ── Coordinate cache ──────────────────────────────────────────────────────────
-_coord_cache: dict[str, dict] = {}  # {query: {coords: (x,y), template: Image}}
-_CACHE_REGION_SIZE = 80
-_SIMILARITY_THRESHOLD = 0.85
-_PIXEL_TOLERANCE = 30  # max per-channel diff to count a pixel as matching
+_coord_cache: dict[str, tuple[int, int]] = {}
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
@@ -299,56 +296,15 @@ def _stage2_fine(
 
 # ── Coordinate cache helpers ──────────────────────────────────────────────────
 
-def _crop_icon_region(
-    screenshot: Image.Image,
-    cx: int,
-    cy: int,
-    size: int = _CACHE_REGION_SIZE,
-) -> Image.Image:
-    """Return a size×size crop centered on (cx, cy), clamped to screen bounds."""
-    half = size // 2
-    x1 = max(0, cx - half)
-    y1 = max(0, cy - half)
-    x2 = min(screenshot.width, cx + half)
-    y2 = min(screenshot.height, cy + half)
-    crop = screenshot.crop((x1, y1, x2, y2))
-    # Pad back to exact size if clamped at screen edges.
-    if crop.width != size or crop.height != size:
-        padded = Image.new("RGB", (size, size))
-        padded.paste(crop, (0, 0))
-        return padded
-    return crop
+def get_cached_coords(query: str) -> Optional[tuple[int, int]]:
+    """Return cached screen coordinates for a query, or None if not cached."""
+    return _coord_cache.get(query)
 
 
-def _images_similar(
-    img1: Image.Image,
-    img2: Image.Image,
-    threshold: float = _SIMILARITY_THRESHOLD,
-) -> bool:
-    """
-    Return True if the fraction of matching pixels is >= threshold.
-    Two pixels match when all RGB channel differences are <= _PIXEL_TOLERANCE.
-    """
-    if img1.size != img2.size:
-        img2 = img2.resize(img1.size)
-
-    rgb1 = img1.convert("RGB")
-    rgb2 = img2.convert("RGB")
-
-    pixels1 = list(rgb1.getdata())
-    pixels2 = list(rgb2.getdata())
-    total = len(pixels1)
-    if total == 0:
-        return False
-
-    matching = sum(
-        1
-        for p1, p2 in zip(pixels1, pixels2)
-        if all(abs(a - b) <= _PIXEL_TOLERANCE for a, b in zip(p1, p2))
-    )
-    similarity = matching / total
-    logger.debug("Template similarity: %.1f%% (threshold %.0f%%)", similarity * 100, threshold * 100)
-    return similarity >= threshold
+def set_cached_coords(query: str, x: int, y: int) -> None:
+    """Store screen coordinates for a query."""
+    _coord_cache[query] = (x, y)
+    logger.debug("Cached coords for %r: (%d, %d)", query, x, y)
 
 
 def invalidate_cache(query: Optional[str] = None) -> None:
@@ -460,33 +416,14 @@ def ground(
     )
 
 
-def ground_cached(
+def ground_and_cache(
     query: str,
     screenshot: Image.Image,
     save_annotated_to: Optional[Path] = None,
 ) -> tuple[int, int]:
-    """
-    Like ground(), but caches coordinates after the first successful call.
-
-    On subsequent calls, compares a small template crop at the cached position
-    against the current screenshot. If the icon hasn't moved (>= 85% pixel match),
-    returns cached coords instantly without VLM API calls. Otherwise re-grounds
-    and updates the cache.
-    """
-    cached = _coord_cache.get(query)
-    if cached:
-        current_crop = _crop_icon_region(screenshot, *cached["coords"])
-        if _images_similar(cached["template"], current_crop):
-            logger.info("Cache HIT for %r — skipping grounding, using (%d, %d)",
-                        query, *cached["coords"])
-            return cached["coords"]
-        logger.info("Cache MISS for %r — icon moved, re-grounding", query)
-
+    """Run full VLM grounding and store the result in the coordinate cache."""
     x, y = ground(query, screenshot, save_annotated_to=save_annotated_to)
-    _coord_cache[query] = {
-        "coords": (x, y),
-        "template": _crop_icon_region(screenshot, x, y),
-    }
+    set_cached_coords(query, x, y)
     return x, y
 
 
