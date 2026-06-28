@@ -35,20 +35,35 @@ _OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 _MAX_RETRIES = int(os.getenv("MAX_GROUNDING_RETRIES", "3"))
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
-_STAGE1_PROMPT = """You are a GUI grounding agent analyzing a desktop screenshot.
+_STAGE1_PROMPT = """You are a GUI grounding agent analyzing a full Windows desktop screenshot \
+(1920×1080 pixels).
 
 Your task: locate the UI element described as: "{query}"
+
+Visual description of the target:
+- A small Windows desktop shortcut icon, approximately 32-48 pixels wide.
+- The Notepad icon shows a notepad or document with horizontal text lines, typically \
+in blue/white colors or a pencil-and-paper illustration.
+- It has a short text label directly underneath it, reading "Notepad".
+- It sits on the desktop surface (NOT inside the taskbar at the very bottom of the screen).
+- It could be ANYWHERE on the desktop: top-left corner, top-right corner, bottom-left, \
+bottom-right, or center — do not assume any particular location.
+
+Instructions:
+- Carefully scan the ENTIRE desktop, including all four corners and edges, before answering.
+- Look for small icon-sized elements (30-60 pixels) with a label underneath.
+- Do NOT guess or default to the center of the screen if you are unsure.
+- If you genuinely cannot find the element anywhere, return all zeros.
 
 Return ONLY valid JSON with this exact structure:
 {{"x1": <int>, "y1": <int>, "x2": <int>, "y2": <int>}}
 
-Where x1,y1 is the top-left corner and x2,y2 is the bottom-right corner
-of the bounding box around the element, in pixel coordinates.
+Where x1,y1 is the top-left corner and x2,y2 is the bottom-right corner of the bounding \
+box (pixel coordinates: x in 0-1920, y in 0-1080).
 
 Rules:
-- The coordinates must be within the image bounds.
-- If you cannot find the element, return {{"x1": 0, "y1": 0, "x2": 0, "y2": 0}}
-- Return ONLY the JSON, no explanation."""
+- Return ONLY the JSON, no explanation.
+- If you cannot find the element, return {{"x1": 0, "y1": 0, "x2": 0, "y2": 0}}"""
 
 _STAGE2_PROMPT = """You are a GUI grounding agent analyzing a cropped screenshot region.
 
@@ -77,6 +92,28 @@ Rules:
 100% certain. Only return {{"x": -1, "y": -1}} if there is absolutely no desktop \
 icon visible anywhere in this image.
 - Return ONLY the JSON, no explanation."""
+
+_DIRECT_PROMPT = """You are a GUI grounding agent. Look carefully at this full Windows desktop \
+screenshot (1920×1080 pixels).
+
+Find and return the exact center pixel of: "{query}"
+
+Visual description:
+- A small Windows desktop shortcut icon (32-48 pixels wide).
+- The Notepad icon shows a notepad/document with horizontal lines, typically blue/white or \
+a pencil-and-paper illustration.
+- It has a text label underneath reading "Notepad".
+- It is on the desktop surface — NOT in the taskbar at the bottom of the screen.
+- It can be anywhere: top-left, top-right, bottom-left, bottom-right, or center.
+
+Scan every corner and edge of the screen carefully.
+
+Return ONLY valid JSON:
+{{"x": <int>, "y": <int>}}
+
+Where x (0-1920) and y (0-1080) are the center pixel of the element in the full screenshot.
+Only return {{"x": -1, "y": -1}} if the element is completely absent.
+Return ONLY the JSON, no explanation."""
 
 _POPUP_PROMPT = """You are a GUI agent. Analyze this screenshot.
 
@@ -220,14 +257,31 @@ def _stage2_fine(
     lx, ly = data["x"], data["y"]
 
     if lx == -1 and ly == -1:
-        # Stage 2 couldn't commit to a location. Fall back to the center of the
-        # Stage 1 bounding box — it's a tight ~50px box so the center is a
-        # reliable click target even without Stage 2 refinement.
+        # Stage 2 couldn't find the element in the crop — Stage 1 may have pointed
+        # to the wrong region. Try a direct single-stage query on the full screenshot.
+        logger.warning(
+            "[Stage 2] VLM returned no center — trying direct full-screenshot query."
+        )
+        direct_prompt = _DIRECT_PROMPT.format(query=query)
+        direct_raw = _call_vlm(direct_prompt, screenshot)
+        logger.debug("[Direct] Raw response: %s", direct_raw)
+        direct_data = _parse_json(direct_raw)
+        dx, dy = direct_data["x"], direct_data["y"]
+
+        if dx != -1 and dy != -1:
+            # Apply same normalization check for 0-1000 scale
+            if dx > screenshot.width or dy > screenshot.height:
+                dx = int(dx / 1000 * screenshot.width)
+                dy = int(dy / 1000 * screenshot.height)
+            logger.info("[Direct] Found element at screen=(%d,%d)", dx, dy)
+            return dx, dy
+
+        # Last resort: use Stage 1 box center (better than failing entirely)
         sx = (region.x1 + region.x2) // 2
         sy = (region.y1 + region.y2) // 2
         logger.warning(
-            "[Stage 2] VLM returned no center — falling back to Stage 1 box center: "
-            "screen=(%d,%d)", sx, sy,
+            "[Direct] Also failed — falling back to Stage 1 box center: screen=(%d,%d)",
+            sx, sy,
         )
         return sx, sy
 
