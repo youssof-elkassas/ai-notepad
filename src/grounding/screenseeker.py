@@ -24,7 +24,7 @@ from typing import Optional
 from PIL import Image
 from dotenv import load_dotenv
 
-from src.automation.screen import Region, crop_region, image_to_base64
+from src.automation.screen import Region, crop_region, image_to_base64, save_screenshot
 from src.utils.logger import get_logger
 
 load_dotenv()
@@ -36,6 +36,10 @@ _PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()
 _GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 _OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 _MAX_RETRIES = int(os.getenv("MAX_GROUNDING_RETRIES", "3"))
+
+# ── VLM trace (debug screenshots sent to the model) ───────────────────────────
+_VLM_TRACE_DIR = Path("screenshots/vlm_trace")
+_trace_counter = 0
 
 # ── Coordinate cache ──────────────────────────────────────────────────────────
 _coord_cache: dict[str, tuple[int, int]] = {}
@@ -103,6 +107,18 @@ Return ONLY the JSON, no explanation."""
 
 # ── VLM client factory ────────────────────────────────────────────────────────
 
+def _save_vlm_trace(img: Image.Image, label: str) -> Path:
+    """Persist a copy of every image sent to the VLM for debugging."""
+    global _trace_counter
+    _trace_counter += 1
+    _VLM_TRACE_DIR.mkdir(parents=True, exist_ok=True)
+    safe_label = re.sub(r"[^\w\-.]", "_", label)
+    path = _VLM_TRACE_DIR / f"{_trace_counter:04d}_{safe_label}.png"
+    save_screenshot(img, path)
+    logger.info("VLM trace saved → %s", path)
+    return path
+
+
 def _call_gemini(prompt: str, img: Image.Image) -> str:
     """Send image + prompt to Gemini and return raw text response."""
     import io
@@ -156,8 +172,9 @@ def _call_openai(prompt: str, img: Image.Image) -> str:
     return response.choices[0].message.content
 
 
-def _call_vlm(prompt: str, img: Image.Image) -> str:
-    """Route to the configured VLM provider."""
+def _call_vlm(prompt: str, img: Image.Image, trace_label: str) -> str:
+    """Route to the configured VLM provider, saving a trace image first."""
+    _save_vlm_trace(img, trace_label)
     if _PROVIDER == "openai":
         return _call_openai(prompt, img)
     return _call_gemini(prompt, img)
@@ -175,14 +192,20 @@ def _parse_json(text: str) -> dict:
 
 # ── Stage 1: coarse localization ──────────────────────────────────────────────
 
-def _query_region_for_bbox(img: Image.Image, query: str, offset_x: int = 0, offset_y: int = 0) -> Optional[Region]:
+def _query_region_for_bbox(
+    img: Image.Image,
+    query: str,
+    trace_label: str,
+    offset_x: int = 0,
+    offset_y: int = 0,
+) -> Optional[Region]:
     """
     Ask the VLM for a bounding box within `img`.
     If found, maps the result back to full-screen coordinates using offset_x/offset_y.
     Returns a Region or None.
     """
     prompt = _STAGE1_PROMPT.format(query=query, width=img.width, height=img.height)
-    raw = _call_vlm(prompt, img)
+    raw = _call_vlm(prompt, img, trace_label)
     logger.debug("[Stage 1] Raw response: %s", raw)
 
     data = _parse_json(raw)
@@ -199,11 +222,12 @@ def _query_region_for_bbox(img: Image.Image, query: str, offset_x: int = 0, offs
     )
 
 
-def _stage1_full(screenshot: Image.Image, query: str) -> Optional[Region]:
+def _stage1_full(screenshot: Image.Image, query: str, attempt: int) -> Optional[Region]:
     """Stage 1 on the complete screenshot."""
     logger.info("[Stage 1] Sending full %dx%d screenshot to VLM for: %r",
                 screenshot.width, screenshot.height, query)
-    region = _query_region_for_bbox(screenshot, query)
+    trace_label = f"stage1_attempt{attempt}_full_{screenshot.width}x{screenshot.height}"
+    region = _query_region_for_bbox(screenshot, query, trace_label)
     if region:
         logger.info("[Stage 1] Coarse region: %s", region)
     else:
@@ -211,7 +235,7 @@ def _stage1_full(screenshot: Image.Image, query: str) -> Optional[Region]:
     return region
 
 
-def _stage1_quadrant_scan(screenshot: Image.Image, query: str) -> Optional[Region]:
+def _stage1_quadrant_scan(screenshot: Image.Image, query: str, attempt: int) -> Optional[Region]:
     """
     Divide the screen into 4 quadrants and scan each one individually.
 
@@ -234,7 +258,12 @@ def _stage1_quadrant_scan(screenshot: Image.Image, query: str) -> Optional[Regio
         logger.info("[Stage 1 Scan] Checking %s quadrant (%dx%d) for: %r",
                     name, quad_img.width, quad_img.height, query)
 
-        region = _query_region_for_bbox(quad_img, query, offset_x=qx1, offset_y=qy1)
+        trace_label = (
+            f"stage1_attempt{attempt}_quadrant_{name}_{quad_img.width}x{quad_img.height}"
+        )
+        region = _query_region_for_bbox(
+            quad_img, query, trace_label, offset_x=qx1, offset_y=qy1,
+        )
         if region is not None:
             logger.info("[Stage 1 Scan] Found in %s quadrant: %s", name, region)
             return region
@@ -251,6 +280,7 @@ def _stage2_fine(
     screenshot: Image.Image,
     region: Region,
     query: str,
+    attempt: int,
 ) -> Optional[tuple[int, int]]:
     """
     Stage 2 — Grounder: crop to the Stage 1 region and pinpoint the exact center.
@@ -269,7 +299,8 @@ def _stage2_fine(
     )
     logger.info("[Stage 2] Sending %dx%d crop to VLM for: %r", crop.width, crop.height, query)
 
-    raw = _call_vlm(prompt, crop)
+    trace_label = f"stage2_attempt{attempt}_crop_{crop.width}x{crop.height}"
+    raw = _call_vlm(prompt, crop, trace_label)
     logger.debug("[Stage 2] Raw response: %s", raw)
 
     data = _parse_json(raw)
@@ -354,9 +385,9 @@ def ground(
         try:
             # Stage 1: full screenshot on first attempt, quadrant scan on retries.
             if attempt == 1:
-                region = _stage1_full(screenshot, query)
+                region = _stage1_full(screenshot, query, attempt)
             else:
-                region = _stage1_quadrant_scan(screenshot, query)
+                region = _stage1_quadrant_scan(screenshot, query, attempt)
 
             if region is None:
                 raise RuntimeError("Stage 1 returned no region.")
@@ -364,7 +395,7 @@ def ground(
             last_region = region
 
             # Stage 2: zoom into the Stage 1 region for precise center.
-            center = _stage2_fine(screenshot, region, query)
+            center = _stage2_fine(screenshot, region, query, attempt)
 
             # Last attempt: if Stage 2 still fails, fall back to Stage 1 box center.
             if center is None and attempt == _MAX_RETRIES:
@@ -434,7 +465,8 @@ def detect_popup(screenshot: Image.Image) -> dict:
     Returns a dict with keys: has_popup (bool), description (str), dismiss_key (str).
     """
     logger.info("Checking for popup / blocking dialog…")
-    raw = _call_vlm(_POPUP_PROMPT, screenshot)
+    trace_label = f"popup_check_{screenshot.width}x{screenshot.height}"
+    raw = _call_vlm(_POPUP_PROMPT, screenshot, trace_label)
     logger.debug("Popup check response: %s", raw)
     result = _parse_json(raw)
     if result.get("has_popup"):
