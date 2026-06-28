@@ -190,6 +190,43 @@ def _parse_json(text: str) -> dict:
     return json.loads(text)
 
 
+def _normalize_bbox_if_needed(
+    x1: int, y1: int, x2: int, y2: int, img_w: int, img_h: int,
+) -> tuple[int, int, int, int]:
+    """
+    Convert Gemini 0-1000 normalized bbox to pixel coordinates when detected.
+
+    On full-screen images (>=1000px), Gemini often returns bbox values in 0-1000
+    scale even when the prompt asks for pixels. Quadrant crops (<1000px wide) are
+    left as-is since their coords are already in local pixels.
+    """
+    if x2 > img_w or y2 > img_h:
+        logger.debug(
+            "[Stage 1] Normalizing out-of-bounds bbox (%d,%d,%d,%d) from 0-1000 scale.",
+            x1, y1, x2, y2,
+        )
+        return (
+            int(x1 / 1000 * img_w),
+            int(y1 / 1000 * img_h),
+            int(x2 / 1000 * img_w),
+            int(y2 / 1000 * img_h),
+        )
+
+    if img_w >= 1000 and img_h >= 1000 and max(x1, y1, x2, y2) <= 1000:
+        logger.debug(
+            "[Stage 1] Normalizing bbox (%d,%d,%d,%d) from 0-1000 scale to %dx%d px.",
+            x1, y1, x2, y2, img_w, img_h,
+        )
+        return (
+            int(x1 / 1000 * img_w),
+            int(y1 / 1000 * img_h),
+            int(x2 / 1000 * img_w),
+            int(y2 / 1000 * img_h),
+        )
+
+    return x1, y1, x2, y2
+
+
 # ── Stage 1: coarse localization ──────────────────────────────────────────────
 
 def _query_region_for_bbox(
@@ -213,6 +250,8 @@ def _query_region_for_bbox(
 
     if x1 == 0 and y1 == 0 and x2 == 0 and y2 == 0:
         return None
+
+    x1, y1, x2, y2 = _normalize_bbox_if_needed(x1, y1, x2, y2, img.width, img.height)
 
     return Region(
         x1=max(0, offset_x + x1),
