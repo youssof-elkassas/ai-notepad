@@ -54,13 +54,17 @@ _STAGE2_PROMPT = """You are a GUI grounding agent analyzing a cropped screenshot
 
 Your task: find the exact center pixel of: "{query}"
 
+The image you are analyzing is exactly {width} pixels wide and {height} pixels tall.
+
 Return ONLY valid JSON with this exact structure:
 {{"x": <int>, "y": <int>}}
 
-Where x,y is the center of the element in pixel coordinates within THIS cropped image.
+Where x is a pixel column (0 to {width_max}) and y is a pixel row (0 to {height_max}) \
+within THIS image — not the original full screen.
 
 Rules:
-- Coordinates must be within the bounds of this cropped image.
+- x must be an integer between 0 and {width_max} (inclusive).
+- y must be an integer between 0 and {height_max} (inclusive).
 - If not found, return {{"x": -1, "y": -1}}
 - Return ONLY the JSON, no explanation."""
 
@@ -190,7 +194,13 @@ def _stage2_fine(
     padded = region.padded(pct=0.20, screen_w=screenshot.width, screen_h=screenshot.height)
     crop = crop_region(screenshot, padded)
 
-    prompt = _STAGE2_PROMPT.format(query=query)
+    prompt = _STAGE2_PROMPT.format(
+        query=query,
+        width=crop.width,
+        height=crop.height,
+        width_max=crop.width - 1,
+        height_max=crop.height - 1,
+    )
     logger.info("[Stage 2] Sending %dx%d crop to VLM for: %r", crop.width, crop.height, query)
 
     raw = _call_vlm(prompt, crop)
@@ -202,6 +212,18 @@ def _stage2_fine(
     if lx == -1 and ly == -1:
         logger.warning("[Stage 2] VLM reported element not found in crop.")
         return None
+
+    # Gemini sometimes returns coordinates on a 0-1000 normalized scale instead of
+    # pixel offsets. Detect this by checking if either value exceeds the crop bounds,
+    # then rescale back to pixels.
+    if lx > crop.width or ly > crop.height:
+        logger.debug(
+            "[Stage 2] Normalizing out-of-bounds response (%d,%d) from 0-1000 scale "
+            "to %dx%d crop pixels.",
+            lx, ly, crop.width, crop.height,
+        )
+        lx = int(lx / 1000 * crop.width)
+        ly = int(ly / 1000 * crop.height)
 
     sx, sy = padded.map_local_to_screen(lx, ly)
     logger.info("[Stage 2] Fine center: local=(%d,%d) → screen=(%d,%d)", lx, ly, sx, sy)
