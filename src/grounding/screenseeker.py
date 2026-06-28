@@ -213,13 +213,16 @@ def _stage2_fine(
 def ground(
     query: str,
     screenshot: Image.Image,
+    save_annotated_to: Optional[Path] = None,
 ) -> tuple[int, int]:
     """
     Locate a UI element on screen using two-stage cascaded VLM grounding.
 
     Args:
-        query:      Plain-English description of the target element.
-        screenshot: Full-screen PIL Image.
+        query:              Plain-English description of the target element.
+        screenshot:         Full-screen PIL Image.
+        save_annotated_to:  If provided, save an annotated screenshot (bounding
+                            box + crosshair) to this Path after successful grounding.
 
     Returns:
         (x, y) screen coordinates of the element center.
@@ -227,6 +230,8 @@ def ground(
     Raises:
         RuntimeError: if grounding fails after all retries.
     """
+    from src.grounding.annotator import save_annotated
+
     last_exc: Optional[Exception] = None
 
     for attempt in range(1, _MAX_RETRIES + 1):
@@ -249,6 +254,18 @@ def ground(
                 )
 
             logger.info("Grounding SUCCESS: %r → screen=(%d,%d)", query, sx, sy)
+
+            # Save annotated screenshot if requested
+            if save_annotated_to is not None:
+                save_annotated(
+                    img=screenshot,
+                    region=region,
+                    center=(sx, sy),
+                    label=query,
+                    path=save_annotated_to,
+                    stage="ScreenSeekeR",
+                )
+
             return sx, sy
 
         except Exception as exc:
