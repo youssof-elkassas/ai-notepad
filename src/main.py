@@ -27,6 +27,7 @@ from src.api.posts import fetch_posts
 from src.automation.mouse import hotkey, press
 from src.automation.notepad import close_notepad, open_notepad, save_file, type_content
 from src.automation.screen import capture_desktop, save_screenshot
+from src.grounding.defaults import get_grounding_query
 from src.grounding.screenseeker import (
     detect_popup,
     get_cached_coords,
@@ -38,7 +39,6 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 _SCREENSHOTS_DIR = Path("screenshots")
-_NOTEPAD_QUERY = "Notepad desktop shortcut icon"
 _MAX_LAUNCH_ATTEMPTS = 3
 _SHOW_DESKTOP_WAIT = 1.0
 
@@ -111,7 +111,8 @@ def main() -> None:
         # ── 2c–2d. Launch Notepad (cached coords first, ground on failure) ──
         annotated_path = _SCREENSHOTS_DIR / f"grounded_post_{post_id:02d}.png"
         launched = False
-        cached = get_cached_coords(_NOTEPAD_QUERY)
+        grounding_query = get_grounding_query()
+        cached = get_cached_coords(grounding_query)
 
         if cached is not None:
             x, y = cached
@@ -121,13 +122,13 @@ def main() -> None:
                 launched = True
             except TimeoutError:
                 logger.warning("Cached coords did not open Notepad — re-grounding…")
-                invalidate_cache(_NOTEPAD_QUERY)
+                invalidate_cache(grounding_query)
 
         if not launched:
             for launch_attempt in range(1, _MAX_LAUNCH_ATTEMPTS + 1):
                 try:
                     x, y = ground_and_cache(
-                        query=_NOTEPAD_QUERY,
+                        query=grounding_query,
                         screenshot=screenshot,
                         save_annotated_to=annotated_path,
                     )
@@ -141,7 +142,7 @@ def main() -> None:
                         launch_attempt,
                         _MAX_LAUNCH_ATTEMPTS,
                     )
-                    invalidate_cache(_NOTEPAD_QUERY)
+                    invalidate_cache(grounding_query)
                     screenshot = _show_desktop_and_capture()
                 except RuntimeError as exc:
                     logger.error("Grounding failed: %s — skipping post.", exc)
