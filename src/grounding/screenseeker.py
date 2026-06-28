@@ -220,8 +220,16 @@ def _stage2_fine(
     lx, ly = data["x"], data["y"]
 
     if lx == -1 and ly == -1:
-        logger.warning("[Stage 2] VLM reported element not found in crop.")
-        return None
+        # Stage 2 couldn't commit to a location. Fall back to the center of the
+        # Stage 1 bounding box — it's a tight ~50px box so the center is a
+        # reliable click target even without Stage 2 refinement.
+        sx = (region.x1 + region.x2) // 2
+        sy = (region.y1 + region.y2) // 2
+        logger.warning(
+            "[Stage 2] VLM returned no center — falling back to Stage 1 box center: "
+            "screen=(%d,%d)", sx, sy,
+        )
+        return sx, sy
 
     # Gemini sometimes returns coordinates on a 0-1000 normalized scale instead of
     # pixel offsets. Detect this by checking if either value exceeds the crop bounds,
