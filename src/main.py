@@ -19,6 +19,7 @@ import sys
 import time
 from pathlib import Path
 
+import pyautogui
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -79,7 +80,11 @@ def main() -> None:
         logger.info("─" * 50)
         logger.info("Post %d/%d  (id=%d): %s", i, len(posts), post_id, title)
 
-        # ── 2a. Capture desktop ────────────────────────────────────
+        # ── 2a. Show desktop, then capture ────────────────────────
+        # Press Win+D to minimize all windows so the VLM sees a clean
+        # desktop with only icons — no terminal text to confuse Stage 1.
+        pyautogui.hotkey("win", "d")
+        time.sleep(1.0)
         screenshot = capture_desktop()
         save_screenshot(
             screenshot,

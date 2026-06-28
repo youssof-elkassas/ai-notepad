@@ -18,6 +18,7 @@ Requires GOOGLE_API_KEY in .env (free at https://aistudio.google.com)
 """
 
 import sys
+import time
 from pathlib import Path
 
 # Allow running from repo root
@@ -26,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from dotenv import load_dotenv
 load_dotenv()
 
+import pyautogui
 from src.automation.screen import capture_desktop, save_screenshot
 from src.grounding.screenseeker import ground
 from src.utils.logger import get_logger
@@ -35,6 +37,8 @@ logger = get_logger("test_grounding")
 SCREENSHOTS_DIR = Path(__file__).parent.parent / "screenshots"
 SCREENSHOTS_DIR.mkdir(exist_ok=True)
 
+_SHOW_DESKTOP_WAIT = 1.0  # seconds to let window-minimize animation finish
+
 
 def main():
     query = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "Notepad desktop shortcut icon"
@@ -43,6 +47,11 @@ def main():
     print(f"  ScreenSeekeR Grounding Test")
     print(f"  Query: {query!r}")
     print(f"{'─'*60}\n")
+
+    # Show desktop before capturing so open terminal windows don't confuse the VLM.
+    print("🖥️  Showing desktop (Win+D) — minimizing all windows…")
+    pyautogui.hotkey("win", "d")
+    time.sleep(_SHOW_DESKTOP_WAIT)
 
     # Step 1: capture desktop
     print("📸  Capturing desktop screenshot…")
