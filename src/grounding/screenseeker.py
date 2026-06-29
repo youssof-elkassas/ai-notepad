@@ -26,6 +26,7 @@ from dotenv import load_dotenv
 
 from src.automation.screen import Region, crop_region, image_to_base64, save_screenshot
 from src.grounding.defaults import get_visual_description
+from src.grounding.template_match import is_template_fallback_enabled, try_template_fallback
 from src.utils.logger import get_logger
 
 load_dotenv()
@@ -420,6 +421,7 @@ def ground(
       Attempt 2 — Stage 1 quadrant scan      → Stage 2 on crop
       Attempt 3 — Stage 1 quadrant scan      → Stage 2 on crop
                   (last resort: Stage 1 box center if Stage 2 returns None)
+      After all VLM attempts fail — BotCity template matching (if enabled)
 
     Args:
         query:              Plain-English description of the target element.
@@ -503,6 +505,12 @@ def ground(
                 attempt, exc, delay,
             )
             time.sleep(delay)
+
+    if is_template_fallback_enabled():
+        logger.info("VLM grounding exhausted — trying BotCity template fallback…")
+        template_result = try_template_fallback(screenshot, query, save_annotated_to)
+        if template_result is not None:
+            return template_result
 
     raise RuntimeError(
         f"Grounding failed for {query!r} after {_MAX_RETRIES} attempts. "

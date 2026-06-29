@@ -1,6 +1,6 @@
 # AI Notepad — Vision-Based Desktop Automation
 
-Automates a Notepad workflow on Windows using **dynamic visual grounding**: a ScreenSeekeR-inspired two-stage cascaded VLM system that can locate any desktop icon or UI element from a plain-text description — no template matching, no hardcoded coordinates.
+Automates a Notepad workflow on Windows using **dynamic visual grounding**: a ScreenSeekeR-inspired two-stage cascaded VLM system that locates desktop icons from plain-text descriptions, with BotCity template matching as a last-resort fallback.
 
 ## How It Works
 
@@ -14,6 +14,10 @@ Desktop Screenshot
        ▼
  Stage 2 — Grounder (Gemini 2.5 Flash on cropped region)
    → Pinpoints exact center (x, y) within the crop
+       │
+       ▼ (if VLM fails)
+ BotCity Template Match (OpenCV)
+   → Last-resort pixel match against resources/templates/
        │
        ▼
  Mouse double-click → Notepad opens
@@ -64,6 +68,7 @@ ai-notepad/
 │   ├── main.py               # Orchestrator — entry point
 │   ├── grounding/
 │   │   ├── screenseeker.py   # Two-stage VLM grounding engine
+│   │   ├── template_match.py # BotCity template-matching fallback
 │   │   └── annotator.py      # Bounding-box annotation for screenshots
 │   ├── automation/
 │   │   ├── screen.py         # Desktop screenshot capture (mss)
@@ -73,9 +78,12 @@ ai-notepad/
 │   │   └── posts.py          # JSONPlaceholder API client
 │   └── utils/
 │       └── logger.py         # Structured logger with screenshot-on-error
+├── resources/
+│   └── templates/            # Template images for BotCity fallback
 ├── screenshots/              # Annotated grounding deliverables
 ├── logs/                     # Runtime error screenshots & logs
 ├── scripts/
+│   ├── capture_template.py      # Generate template PNG from VLM grounding
 │   └── generate_screenshots.py  # Utility to produce the 3 annotated deliverables
 ├── design_doc.md             # Part 1 — System design document
 ├── pyproject.toml
@@ -86,19 +94,26 @@ ai-notepad/
 
 Based on **ScreenSpot-Pro / ScreenSeekeR** ([arXiv:2504.07981](https://arxiv.org/abs/2504.07981)).
 
-The key insight: instead of matching pixels, we ask a vision-language model to reason about the screen like a human would. This makes the system:
+The key insight: we ask a vision-language model to reason about the screen like a human would. If all VLM retries fail, BotCity OpenCV template matching provides a deterministic last resort. This makes the system:
 
-- **Position-invariant** — works wherever the icon is placed
+- **Position-invariant** — VLM works wherever the icon is placed
 - **Description-driven** — target any element with plain English
+- **Resilient** — template fallback when the VLM cannot locate the target
 - **Pop-up resilient** — the VLM can identify and dismiss unexpected dialogs without prior knowledge of their appearance
-- **Generalizable** — change one string to target a different icon, button, or field
+- **Generalizable** — change query + template path to target a different app
+
+Generate the default Notepad template once on Windows:
+
+```bash
+uv run python scripts/capture_template.py
+```
 
 ## Discussion Prep
 
 | Topic | Answer |
 |---|---|
-| Why VLM over template matching? | Position-invariant, zero-shot, handles any visual context |
-| Failure cases? | Very small icons, visually ambiguous screens, VLM hallucination |
+| Why VLM over template matching? | Primary path is zero-shot and position-invariant; template match is last resort only |
+| Failure cases? | Very small icons, visually ambiguous screens, VLM hallucination; missing/outdated template |
 | Performance? | ~2-3s per grounding call; mitigated by cropped Stage 2 |
 | Scaling? | Swap the `query` string — engine is already fully general |
 | Unexpected pop-ups? | VLM detects and dismisses without knowing appearance in advance |
