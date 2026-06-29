@@ -14,6 +14,7 @@ Workflow (×10 posts):
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -41,6 +42,7 @@ logger = get_logger(__name__)
 _SCREENSHOTS_DIR = Path("screenshots")
 _MAX_LAUNCH_ATTEMPTS = 3
 _SHOW_DESKTOP_WAIT = 1.0
+_CHECK_POPUPS = os.getenv("CHECK_POPUPS", "true").lower() in ("1", "true", "yes", "on")
 
 
 def _show_desktop_and_capture():
@@ -84,6 +86,10 @@ def main() -> None:
         sys.exit(1)
 
     logger.info("Starting automation loop for %d posts.", len(posts))
+    if _CHECK_POPUPS:
+        logger.info("Popup check enabled (set CHECK_POPUPS=false to skip).")
+    else:
+        logger.info("Popup check disabled.")
 
     for i, post in enumerate(posts, start=1):
         post_id = post["id"]
@@ -94,12 +100,13 @@ def main() -> None:
         logger.info("Post %d/%d  (id=%d): %s", i, len(posts), post_id, title)
 
         # ── 2a. Popup check (first screenshot) ─────────────────────
-        popup_screenshot = _show_desktop_and_capture()
-        save_screenshot(
-            popup_screenshot,
-            _SCREENSHOTS_DIR / f"popup_post_{post_id:02d}.png",
-        )
-        _dismiss_popup(popup_screenshot)
+        if _CHECK_POPUPS:
+            popup_screenshot = _show_desktop_and_capture()
+            save_screenshot(
+                popup_screenshot,
+                _SCREENSHOTS_DIR / f"popup_post_{post_id:02d}.png",
+            )
+            _dismiss_popup(popup_screenshot)
 
         # ── 2b. Fresh screenshot for grounding / launch ────────────
         screenshot = _show_desktop_and_capture()
