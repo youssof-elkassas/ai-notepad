@@ -29,12 +29,13 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.automation.screen import capture_desktop, save_screenshot
+from src.grounding.defaults import get_grounding_query
 from src.grounding.screenseeker import ground
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_QUERY = "Notepad desktop shortcut icon"
+_QUERY = get_grounding_query()
 _OUT_DIR = Path("screenshots")
 _VALID_POSITIONS = ("top_left", "bottom_right", "center")
 

@@ -4,17 +4,17 @@ AI Notepad — main orchestrator.
 Workflow (×10 posts):
   1. Fetch posts from JSONPlaceholder
   2. For each post:
-     a. Capture desktop screenshot
-     b. Check for blocking popups and dismiss them
-     c. Ground the Notepad desktop icon → get (x, y)
-     d. Open Notepad via double-click
-     e. Type post content
-     f. Save as post_{id}.txt in Desktop\\tjm-project\\
-     g. Close Notepad
+     a. Capture screenshot → check/dismiss popups
+     b. Capture fresh screenshot → ground Notepad icon → get (x, y)
+     c. Open Notepad via double-click
+     d. Type post content
+     e. Save as post_{id}.txt in Desktop\\tjm-project\\
+     f. Close Notepad
 """
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -28,6 +28,7 @@ from src.api.posts import fetch_posts
 from src.automation.mouse import hotkey, press
 from src.automation.notepad import close_notepad, open_notepad, save_file, type_content
 from src.automation.screen import capture_desktop, save_screenshot
+from src.grounding.defaults import get_grounding_query
 from src.grounding.screenseeker import (
     detect_popup,
     get_cached_coords,
@@ -39,8 +40,16 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 _SCREENSHOTS_DIR = Path("screenshots")
-_NOTEPAD_QUERY = "Notepad desktop shortcut icon"
 _MAX_LAUNCH_ATTEMPTS = 3
+_SHOW_DESKTOP_WAIT = 1.0
+_CHECK_POPUPS = os.getenv("CHECK_POPUPS", "true").lower() in ("1", "true", "yes", "on")
+
+
+def _show_desktop_and_capture():
+    """Minimize all windows and capture the desktop."""
+    pyautogui.hotkey("win", "d")
+    time.sleep(_SHOW_DESKTOP_WAIT)
+    return capture_desktop()
 
 
 def _dismiss_popup(screenshot) -> None:
@@ -77,6 +86,10 @@ def main() -> None:
         sys.exit(1)
 
     logger.info("Starting automation loop for %d posts.", len(posts))
+    if _CHECK_POPUPS:
+        logger.info("Popup check enabled (set CHECK_POPUPS=false to skip).")
+    else:
+        logger.info("Popup check disabled.")
 
     for i, post in enumerate(posts, start=1):
         post_id = post["id"]
@@ -86,24 +99,27 @@ def main() -> None:
         logger.info("─" * 50)
         logger.info("Post %d/%d  (id=%d): %s", i, len(posts), post_id, title)
 
-        # ── 2a. Show desktop, then capture ────────────────────────
-        # Press Win+D to minimize all windows so the VLM sees a clean
-        # desktop with only icons — no terminal text to confuse Stage 1.
-        pyautogui.hotkey("win", "d")
-        time.sleep(1.0)
-        screenshot = capture_desktop()
+        # ── 2a. Popup check (first screenshot) ─────────────────────
+        if _CHECK_POPUPS:
+            popup_screenshot = _show_desktop_and_capture()
+            save_screenshot(
+                popup_screenshot,
+                _SCREENSHOTS_DIR / f"popup_post_{post_id:02d}.png",
+            )
+            _dismiss_popup(popup_screenshot)
+
+        # ── 2b. Fresh screenshot for grounding / launch ────────────
+        screenshot = _show_desktop_and_capture()
         save_screenshot(
             screenshot,
             _SCREENSHOTS_DIR / f"raw_post_{post_id:02d}.png",
         )
 
-        # ── 2b. Dismiss any blocking popup ─────────────────────────
-        _dismiss_popup(screenshot)
-
         # ── 2c–2d. Launch Notepad (cached coords first, ground on failure) ──
         annotated_path = _SCREENSHOTS_DIR / f"grounded_post_{post_id:02d}.png"
         launched = False
-        cached = get_cached_coords(_NOTEPAD_QUERY)
+        grounding_query = get_grounding_query()
+        cached = get_cached_coords(grounding_query)
 
         if cached is not None:
             x, y = cached
@@ -113,13 +129,13 @@ def main() -> None:
                 launched = True
             except TimeoutError:
                 logger.warning("Cached coords did not open Notepad — re-grounding…")
-                invalidate_cache(_NOTEPAD_QUERY)
+                invalidate_cache(grounding_query)
 
         if not launched:
             for launch_attempt in range(1, _MAX_LAUNCH_ATTEMPTS + 1):
                 try:
                     x, y = ground_and_cache(
-                        query=_NOTEPAD_QUERY,
+                        query=grounding_query,
                         screenshot=screenshot,
                         save_annotated_to=annotated_path,
                     )
@@ -133,10 +149,8 @@ def main() -> None:
                         launch_attempt,
                         _MAX_LAUNCH_ATTEMPTS,
                     )
-                    invalidate_cache(_NOTEPAD_QUERY)
-                    pyautogui.hotkey("win", "d")
-                    time.sleep(1.0)
-                    screenshot = capture_desktop()
+                    invalidate_cache(grounding_query)
+                    screenshot = _show_desktop_and_capture()
                 except RuntimeError as exc:
                     logger.error("Grounding failed: %s — skipping post.", exc)
                     break

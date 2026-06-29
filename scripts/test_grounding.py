@@ -29,6 +29,7 @@ load_dotenv()
 
 import pyautogui
 from src.automation.screen import capture_desktop, save_screenshot
+from src.grounding.defaults import get_grounding_query
 from src.grounding.screenseeker import ground
 from src.utils.logger import get_logger
 
@@ -41,7 +42,7 @@ _SHOW_DESKTOP_WAIT = 1.0  # seconds to let window-minimize animation finish
 
 
 def main():
-    query = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "Notepad desktop shortcut icon"
+    query = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else get_grounding_query()
 
     print(f"\n{'─'*60}")
     print(f"  ScreenSeekeR Grounding Test")

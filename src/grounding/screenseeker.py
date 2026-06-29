@@ -25,6 +25,7 @@ from PIL import Image
 from dotenv import load_dotenv
 
 from src.automation.screen import Region, crop_region, image_to_base64, save_screenshot
+from src.grounding.defaults import get_visual_description
 from src.utils.logger import get_logger
 
 load_dotenv()
@@ -39,6 +40,7 @@ _MAX_RETRIES = int(os.getenv("MAX_GROUNDING_RETRIES", "3"))
 
 # ── VLM trace (debug screenshots sent to the model) ───────────────────────────
 _VLM_TRACE_DIR = Path("screenshots/vlm_trace")
+_VLM_TRACE_ENABLED = os.getenv("VLM_TRACE", "true").lower() in ("1", "true", "yes", "on")
 _trace_counter = 0
 
 # ── Coordinate cache ──────────────────────────────────────────────────────────
@@ -51,12 +53,7 @@ _STAGE1_PROMPT = """You are a GUI grounding agent analyzing a Windows desktop sc
 Your task: locate the UI element described as: "{query}"
 
 Visual description of the target:
-- A small Windows desktop shortcut icon, approximately 32-48 pixels wide.
-- The Notepad icon shows a notepad or document with horizontal text lines, \
-typically in blue/white colors or a pencil-and-paper illustration.
-- It has a short text label directly underneath it reading "Notepad".
-- It sits on the desktop surface (NOT inside the taskbar at the very bottom).
-- It could be ANYWHERE in the image — do not assume any particular location.
+{visual_description}
 
 Instructions:
 - Scan the ENTIRE image carefully before answering, including corners and edges.
@@ -77,10 +74,8 @@ _STAGE2_PROMPT = """You are a GUI grounding agent analyzing a cropped screenshot
 Your task: pinpoint the exact center pixel of: "{query}"
 
 Visual description:
-- A small Windows desktop shortcut icon (~32-48 px wide).
-- The Notepad icon: a notepad or document with horizontal lines, blue/white or \
-pencil-and-paper style, with a text label "Notepad" underneath.
-- There may be other icons nearby — pick only the one that best matches.
+{visual_description}
+- There may be other similar elements nearby — pick only the one that best matches.
 
 This image is exactly {width}×{height} pixels.
 
@@ -92,7 +87,7 @@ THIS image, not the original screen.
 
 Rules:
 - Return your best estimate even if not 100% certain.
-- Only return {{"x": -1, "y": -1}} if NO desktop icon is visible anywhere in the image.
+- Only return {{"x": -1, "y": -1}} if NO matching element is visible anywhere in the image.
 - Return ONLY the JSON, no explanation."""
 
 _POPUP_PROMPT = """You are a GUI agent. Analyze this screenshot.
@@ -107,8 +102,11 @@ Return ONLY the JSON, no explanation."""
 
 # ── VLM client factory ────────────────────────────────────────────────────────
 
-def _save_vlm_trace(img: Image.Image, label: str) -> Path:
+def _save_vlm_trace(img: Image.Image, label: str) -> Optional[Path]:
     """Persist a copy of every image sent to the VLM for debugging."""
+    if not _VLM_TRACE_ENABLED:
+        return None
+
     global _trace_counter
     _trace_counter += 1
     _VLM_TRACE_DIR.mkdir(parents=True, exist_ok=True)
@@ -190,12 +188,50 @@ def _parse_json(text: str) -> dict:
     return json.loads(text)
 
 
+def _normalize_bbox_if_needed(
+    x1: int, y1: int, x2: int, y2: int, img_w: int, img_h: int,
+) -> tuple[int, int, int, int]:
+    """
+    Convert Gemini 0-1000 normalized bbox to pixel coordinates when detected.
+
+    On full-screen images (>=1000px), Gemini often returns bbox values in 0-1000
+    scale even when the prompt asks for pixels. Quadrant crops (<1000px wide) are
+    left as-is since their coords are already in local pixels.
+    """
+    if x2 > img_w or y2 > img_h:
+        logger.debug(
+            "[Stage 1] Normalizing out-of-bounds bbox (%d,%d,%d,%d) from 0-1000 scale.",
+            x1, y1, x2, y2,
+        )
+        return (
+            int(x1 / 1000 * img_w),
+            int(y1 / 1000 * img_h),
+            int(x2 / 1000 * img_w),
+            int(y2 / 1000 * img_h),
+        )
+
+    if img_w >= 1000 and img_h >= 1000 and max(x1, y1, x2, y2) <= 1000:
+        logger.debug(
+            "[Stage 1] Normalizing bbox (%d,%d,%d,%d) from 0-1000 scale to %dx%d px.",
+            x1, y1, x2, y2, img_w, img_h,
+        )
+        return (
+            int(x1 / 1000 * img_w),
+            int(y1 / 1000 * img_h),
+            int(x2 / 1000 * img_w),
+            int(y2 / 1000 * img_h),
+        )
+
+    return x1, y1, x2, y2
+
+
 # ── Stage 1: coarse localization ──────────────────────────────────────────────
 
 def _query_region_for_bbox(
     img: Image.Image,
     query: str,
     trace_label: str,
+    visual_description: str,
     offset_x: int = 0,
     offset_y: int = 0,
 ) -> Optional[Region]:
@@ -204,7 +240,12 @@ def _query_region_for_bbox(
     If found, maps the result back to full-screen coordinates using offset_x/offset_y.
     Returns a Region or None.
     """
-    prompt = _STAGE1_PROMPT.format(query=query, width=img.width, height=img.height)
+    prompt = _STAGE1_PROMPT.format(
+        query=query,
+        visual_description=visual_description,
+        width=img.width,
+        height=img.height,
+    )
     raw = _call_vlm(prompt, img, trace_label)
     logger.debug("[Stage 1] Raw response: %s", raw)
 
@@ -214,6 +255,8 @@ def _query_region_for_bbox(
     if x1 == 0 and y1 == 0 and x2 == 0 and y2 == 0:
         return None
 
+    x1, y1, x2, y2 = _normalize_bbox_if_needed(x1, y1, x2, y2, img.width, img.height)
+
     return Region(
         x1=max(0, offset_x + x1),
         y1=max(0, offset_y + y1),
@@ -222,12 +265,17 @@ def _query_region_for_bbox(
     )
 
 
-def _stage1_full(screenshot: Image.Image, query: str, attempt: int) -> Optional[Region]:
+def _stage1_full(
+    screenshot: Image.Image,
+    query: str,
+    attempt: int,
+    visual_description: str,
+) -> Optional[Region]:
     """Stage 1 on the complete screenshot."""
     logger.info("[Stage 1] Sending full %dx%d screenshot to VLM for: %r",
                 screenshot.width, screenshot.height, query)
     trace_label = f"stage1_attempt{attempt}_full_{screenshot.width}x{screenshot.height}"
-    region = _query_region_for_bbox(screenshot, query, trace_label)
+    region = _query_region_for_bbox(screenshot, query, trace_label, visual_description)
     if region:
         logger.info("[Stage 1] Coarse region: %s", region)
     else:
@@ -235,7 +283,12 @@ def _stage1_full(screenshot: Image.Image, query: str, attempt: int) -> Optional[
     return region
 
 
-def _stage1_quadrant_scan(screenshot: Image.Image, query: str, attempt: int) -> Optional[Region]:
+def _stage1_quadrant_scan(
+    screenshot: Image.Image,
+    query: str,
+    attempt: int,
+    visual_description: str,
+) -> Optional[Region]:
     """
     Divide the screen into 4 quadrants and scan each one individually.
 
@@ -262,7 +315,8 @@ def _stage1_quadrant_scan(screenshot: Image.Image, query: str, attempt: int) -> 
             f"stage1_attempt{attempt}_quadrant_{name}_{quad_img.width}x{quad_img.height}"
         )
         region = _query_region_for_bbox(
-            quad_img, query, trace_label, offset_x=qx1, offset_y=qy1,
+            quad_img, query, trace_label, visual_description,
+            offset_x=qx1, offset_y=qy1,
         )
         if region is not None:
             logger.info("[Stage 1 Scan] Found in %s quadrant: %s", name, region)
@@ -281,6 +335,7 @@ def _stage2_fine(
     region: Region,
     query: str,
     attempt: int,
+    visual_description: str,
 ) -> Optional[tuple[int, int]]:
     """
     Stage 2 — Grounder: crop to the Stage 1 region and pinpoint the exact center.
@@ -292,6 +347,7 @@ def _stage2_fine(
 
     prompt = _STAGE2_PROMPT.format(
         query=query,
+        visual_description=visual_description,
         width=crop.width,
         height=crop.height,
         width_max=crop.width - 1,
@@ -354,6 +410,7 @@ def ground(
     query: str,
     screenshot: Image.Image,
     save_annotated_to: Optional[Path] = None,
+    visual_description: Optional[str] = None,
 ) -> tuple[int, int]:
     """
     Locate a UI element on screen using two-stage cascaded VLM grounding.
@@ -368,6 +425,7 @@ def ground(
         query:              Plain-English description of the target element.
         screenshot:         Full-screen PIL Image.
         save_annotated_to:  If provided, save an annotated screenshot to this Path.
+        visual_description: Optional visual hints for the VLM; defaults from env/defaults.
 
     Returns:
         (x, y) screen coordinates of the element center.
@@ -377,6 +435,9 @@ def ground(
     """
     from src.grounding.annotator import save_annotated
 
+    if visual_description is None:
+        visual_description = get_visual_description()
+
     last_exc: Optional[Exception] = None
     last_region: Optional[Region] = None
 
@@ -385,9 +446,11 @@ def ground(
         try:
             # Stage 1: full screenshot on first attempt, quadrant scan on retries.
             if attempt == 1:
-                region = _stage1_full(screenshot, query, attempt)
+                region = _stage1_full(screenshot, query, attempt, visual_description)
             else:
-                region = _stage1_quadrant_scan(screenshot, query, attempt)
+                region = _stage1_quadrant_scan(
+                    screenshot, query, attempt, visual_description,
+                )
 
             if region is None:
                 raise RuntimeError("Stage 1 returned no region.")
@@ -395,7 +458,7 @@ def ground(
             last_region = region
 
             # Stage 2: zoom into the Stage 1 region for precise center.
-            center = _stage2_fine(screenshot, region, query, attempt)
+            center = _stage2_fine(screenshot, region, query, attempt, visual_description)
 
             # Last attempt: if Stage 2 still fails, fall back to Stage 1 box center.
             if center is None and attempt == _MAX_RETRIES:
@@ -451,9 +514,15 @@ def ground_and_cache(
     query: str,
     screenshot: Image.Image,
     save_annotated_to: Optional[Path] = None,
+    visual_description: Optional[str] = None,
 ) -> tuple[int, int]:
     """Run full VLM grounding and store the result in the coordinate cache."""
-    x, y = ground(query, screenshot, save_annotated_to=save_annotated_to)
+    x, y = ground(
+        query,
+        screenshot,
+        save_annotated_to=save_annotated_to,
+        visual_description=visual_description,
+    )
     set_cached_coords(query, x, y)
     return x, y
 
