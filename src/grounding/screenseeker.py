@@ -40,6 +40,7 @@ _MAX_RETRIES = int(os.getenv("MAX_GROUNDING_RETRIES", "3"))
 
 # ── VLM trace (debug screenshots sent to the model) ───────────────────────────
 _VLM_TRACE_DIR = Path("screenshots/vlm_trace")
+_VLM_TRACE_ENABLED = os.getenv("VLM_TRACE", "true").lower() in ("1", "true", "yes", "on")
 _trace_counter = 0
 
 # ── Coordinate cache ──────────────────────────────────────────────────────────
@@ -101,8 +102,11 @@ Return ONLY the JSON, no explanation."""
 
 # ── VLM client factory ────────────────────────────────────────────────────────
 
-def _save_vlm_trace(img: Image.Image, label: str) -> Path:
+def _save_vlm_trace(img: Image.Image, label: str) -> Optional[Path]:
     """Persist a copy of every image sent to the VLM for debugging."""
+    if not _VLM_TRACE_ENABLED:
+        return None
+
     global _trace_counter
     _trace_counter += 1
     _VLM_TRACE_DIR.mkdir(parents=True, exist_ok=True)
