@@ -107,13 +107,3 @@ Generate the default Notepad template once on Windows:
 ```bash
 uv run python scripts/capture_template.py
 ```
-
-## Discussion Prep
-
-| Topic | Answer |
-|---|---|
-| Why VLM over template matching? | Primary path is zero-shot and position-invariant; template match is last resort only |
-| Failure cases? | Very small icons, visually ambiguous screens, VLM hallucination; missing/outdated template |
-| Performance? | ~2-3s per grounding call; mitigated by cropped Stage 2 |
-| Scaling? | Swap the `query` string — engine is already fully general |
-| Unexpected pop-ups? | VLM detects and dismisses without knowing appearance in advance |
