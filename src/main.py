@@ -99,6 +99,28 @@ def _dismiss_popup(screenshot) -> bool:
     return True
 
 
+def _log_run_summary(
+    results: list[tuple[int, int, str, str]],
+) -> None:
+    """Log per-post outcomes. Each item is (index, post_id, status, detail)."""
+    total = len(results)
+    ok = sum(1 for _, _, status, _ in results if status == "SUCCESS")
+    failed = total - ok
+
+    logger.info("=" * 60)
+    logger.info("Run summary — %d/%d succeeded, %d failed", ok, total, failed)
+    logger.info("-" * 60)
+    for index, post_id, status, detail in results:
+        if status == "SUCCESS":
+            logger.info("  Post %d (id=%d): SUCCESS", index, post_id)
+        else:
+            logger.info("  Post %d (id=%d): FAILED — %s", index, post_id, detail)
+    logger.info("=" * 60)
+    if ok:
+        logger.info("Files saved to Desktop\\tjm-project\\")
+    logger.info("=" * 60)
+
+
 def main() -> None:
     logger.info("=" * 60)
     logger.info("AI Notepad — Vision-Based Desktop Automation")
@@ -120,6 +142,8 @@ def main() -> None:
         logger.info("Coord cache enabled (set COORD_CACHE=false to skip).")
     else:
         logger.info("Coord cache disabled — grounding every post.")
+
+    results: list[tuple[int, int, str, str]] = []
 
     for i, post in enumerate(posts, start=1):
         post_id = post["id"]
@@ -152,6 +176,7 @@ def main() -> None:
         launched = False
         grounding_query = get_grounding_query()
         cached = get_cached_coords(grounding_query)
+        fail_reason = "could not open Notepad"
 
         if cached is not None:
             x, y = cached
@@ -183,8 +208,10 @@ def main() -> None:
                     )
                     invalidate_cache(grounding_query)
                     screenshot = _show_desktop_and_capture()
+                    fail_reason = "Notepad did not open after grounding retries"
                 except RuntimeError as exc:
                     logger.error("Grounding failed: %s — skipping post.", exc)
+                    fail_reason = f"grounding failed: {exc}"
                     break
 
         # VLM may return coords that miss the icon; template match after failed opens.
@@ -208,12 +235,16 @@ def main() -> None:
                     logger.error(
                         "Template match at (%d, %d) did not open Notepad.", x, y
                     )
+                    fail_reason = "template match did not open Notepad"
+            else:
+                fail_reason = "template match found no icon"
 
         if not launched:
             logger.error(
                 "Could not open Notepad after %d attempts — skipping post.",
                 _MAX_LAUNCH_ATTEMPTS,
             )
+            results.append((i, post_id, "FAILED", fail_reason))
             continue
 
         # ── 2e–2g. Type → Save → Close ─────────────────────────────
@@ -231,13 +262,13 @@ def main() -> None:
                 press("enter")
             except Exception:
                 pass
+            results.append((i, post_id, "FAILED", f"automation error: {exc}"))
             continue
 
         logger.info("Post %d saved successfully.", post_id)
+        results.append((i, post_id, "SUCCESS", "saved"))
 
-    logger.info("=" * 60)
-    logger.info("All done! Files saved to Desktop\\tjm-project\\")
-    logger.info("=" * 60)
+    _log_run_summary(results)
 
 
 if __name__ == "__main__":
