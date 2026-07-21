@@ -120,6 +120,12 @@ Boolean flags accept `true` / `false` (also `1` / `0` / `yes` / `on`). Defaults 
 |---|---|---|
 | `NOTEPAD_LAUNCH_WAIT` | `2.0` | Seconds to wait after double-click before checking the process |
 
+### Posts API
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `POSTS_API_URL` | `https://jsonplaceholder.typicode.com/posts` | Endpoint used by `fetch_posts()` |
+
 Retarget **finding** another desktop icon by changing `GROUNDING_QUERY` (+ visual description) and regenerating / pointing `TEMPLATE_IMAGE_PATH`. The post-click workflow still opens **Notepad** and saves post text files.
 
 ## Testing
