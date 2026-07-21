@@ -20,10 +20,6 @@ logger = get_logger(__name__)
 # Seconds to wait for Notepad to appear after double-clicking the icon.
 _LAUNCH_WAIT = float(os.getenv("NOTEPAD_LAUNCH_WAIT", "2.0"))
 
-# Vertical offset applied to grounded coords — VLM often targets the icon
-# center between the graphic and label; nudge downward onto the clickable icon.
-_CLICK_OFFSET_Y = int(os.getenv("NOTEPAD_CLICK_OFFSET_Y", "20"))
-
 # Save dialog: extra time for the dialog to fully render before typing.
 _DIALOG_WAIT = 0.8
 
@@ -131,14 +127,9 @@ def open_notepad(x: int, y: int) -> None:
     Double-click the desktop icon at (x, y) and wait for Notepad to open.
     Raises TimeoutError if the window never appears.
     """
-    click_y = y + _CLICK_OFFSET_Y
-    logger.info(
-        "Opening Notepad via icon at (%d, %d) with Y offset +%d → (%d, %d)",
-        x, y, _CLICK_OFFSET_Y, x, click_y,
-    )
-
+    logger.info("Opening Notepad via icon at (%d, %d)", x, y)
     before_count = _notepad_process_count()
-    double_click(x, click_y)
+    double_click(x, y)
     time.sleep(_LAUNCH_WAIT)
     _wait_for_new_notepad(before_count)
     logger.info("Notepad is open.")
