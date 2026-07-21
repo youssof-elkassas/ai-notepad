@@ -45,7 +45,14 @@ _VLM_TRACE_ENABLED = os.getenv("VLM_TRACE", "true").lower() in ("1", "true", "ye
 _trace_counter = 0
 
 # ── Coordinate cache ──────────────────────────────────────────────────────────
+_COORD_CACHE_ENABLED = os.getenv("COORD_CACHE", "true").lower() in (
+    "1", "true", "yes", "on",
+)
 _coord_cache: dict[str, tuple[int, int]] = {}
+
+
+def is_coord_cache_enabled() -> bool:
+    return _COORD_CACHE_ENABLED
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
@@ -385,12 +392,16 @@ def _stage2_fine(
 # ── Coordinate cache helpers ──────────────────────────────────────────────────
 
 def get_cached_coords(query: str) -> Optional[tuple[int, int]]:
-    """Return cached screen coordinates for a query, or None if not cached."""
+    """Return cached screen coordinates for a query, or None if disabled/missing."""
+    if not _COORD_CACHE_ENABLED:
+        return None
     return _coord_cache.get(query)
 
 
 def set_cached_coords(query: str, x: int, y: int) -> None:
-    """Store screen coordinates for a query."""
+    """Store screen coordinates for a query (no-op when COORD_CACHE is off)."""
+    if not _COORD_CACHE_ENABLED:
+        return
     _coord_cache[query] = (x, y)
     logger.debug("Cached coords for %r: (%d, %d)", query, x, y)
 
@@ -524,7 +535,7 @@ def ground_and_cache(
     save_annotated_to: Optional[Path] = None,
     visual_description: Optional[str] = None,
 ) -> tuple[int, int]:
-    """Run full VLM grounding and store the result in the coordinate cache."""
+    """Run full VLM grounding; cache coords when COORD_CACHE is enabled."""
     x, y = ground(
         query,
         screenshot,

@@ -4,8 +4,8 @@ AI Notepad — main orchestrator.
 Workflow (×10 posts):
   1. Fetch posts from JSONPlaceholder
   2. For each post:
-     a. Capture screenshot → check/dismiss popups
-     b. Capture fresh screenshot → ground Notepad icon → get (x, y)
+     a. Win+D once → optional popup check/dismiss (same desktop view)
+     b. Capture desktop (no second Win+D) → ground Notepad icon → (x, y)
      c. Open Notepad via double-click
      d. Type post content
      e. Save as post_{id}.txt in Desktop\\tjm-project\\
@@ -34,6 +34,12 @@ from src.grounding.screenseeker import (
     get_cached_coords,
     ground_and_cache,
     invalidate_cache,
+    is_coord_cache_enabled,
+    set_cached_coords,
+)
+from src.grounding.template_match import (
+    is_template_fallback_enabled,
+    try_template_fallback,
 )
 from src.utils.logger import get_logger
 
@@ -45,18 +51,37 @@ _SHOW_DESKTOP_WAIT = 1.0
 _CHECK_POPUPS = os.getenv("CHECK_POPUPS", "true").lower() in ("1", "true", "yes", "on")
 
 
+def _move_mouse_top_center() -> None:
+    """Park the cursor at the top-center of the screen (away from desktop icons)."""
+    screen_w, _screen_h = pyautogui.size()
+    x, y = screen_w // 2, 0
+    logger.debug("Moving mouse to top-center (%d, %d)", x, y)
+    pyautogui.moveTo(x, y)
+    time.sleep(0.1)
+
+
+def _capture_desktop():
+    """Capture the desktop; with COORD_CACHE=false, park cursor at top-center first."""
+    if not is_coord_cache_enabled():
+        _move_mouse_top_center()
+    return capture_desktop()
+
+
 def _show_desktop_and_capture():
     """Minimize all windows and capture the desktop."""
     pyautogui.hotkey("win", "d")
     time.sleep(_SHOW_DESKTOP_WAIT)
-    return capture_desktop()
+    return _capture_desktop()
 
 
-def _dismiss_popup(screenshot) -> None:
-    """Check for a blocking dialog and dismiss it if present."""
+def _dismiss_popup(screenshot) -> bool:
+    """Check for a blocking dialog and dismiss it if present.
+
+    Returns True if a popup was dismissed (caller may need a fresh capture).
+    """
     result = detect_popup(screenshot)
     if not result.get("has_popup"):
-        return
+        return False
 
     description = result.get("description", "unknown")
     dismiss_key = result.get("dismiss_key", "Escape")
@@ -71,6 +96,7 @@ def _dismiss_popup(screenshot) -> None:
         press("escape")
 
     time.sleep(0.5)
+    return True
 
 
 def main() -> None:
@@ -90,6 +116,10 @@ def main() -> None:
         logger.info("Popup check enabled (set CHECK_POPUPS=false to skip).")
     else:
         logger.info("Popup check disabled.")
+    if is_coord_cache_enabled():
+        logger.info("Coord cache enabled (set COORD_CACHE=false to skip).")
+    else:
+        logger.info("Coord cache disabled — grounding every post.")
 
     for i, post in enumerate(posts, start=1):
         post_id = post["id"]
@@ -99,17 +129,19 @@ def main() -> None:
         logger.info("─" * 50)
         logger.info("Post %d/%d  (id=%d): %s", i, len(posts), post_id, title)
 
-        # ── 2a. Popup check (first screenshot) ─────────────────────
+        # ── 2a–2b. Show desktop once, optional popup check, then ground ─
+        # Win+D is a toggle: a second press would restore windows (terminal,
+        # IDE, etc.) before raw_post_*.png — so never call it twice here.
+        screenshot = _show_desktop_and_capture()
         if _CHECK_POPUPS:
-            popup_screenshot = _show_desktop_and_capture()
             save_screenshot(
-                popup_screenshot,
+                screenshot,
                 _SCREENSHOTS_DIR / f"popup_post_{post_id:02d}.png",
             )
-            _dismiss_popup(popup_screenshot)
+            if _dismiss_popup(screenshot):
+                # Desktop should still be showing; capture again without Win+D.
+                screenshot = _capture_desktop()
 
-        # ── 2b. Fresh screenshot for grounding / launch ────────────
-        screenshot = _show_desktop_and_capture()
         save_screenshot(
             screenshot,
             _SCREENSHOTS_DIR / f"raw_post_{post_id:02d}.png",
@@ -154,6 +186,28 @@ def main() -> None:
                 except RuntimeError as exc:
                     logger.error("Grounding failed: %s — skipping post.", exc)
                     break
+
+        # VLM may return coords that miss the icon; template match after failed opens.
+        if not launched and is_template_fallback_enabled():
+            logger.info(
+                "Launch retries exhausted — trying BotCity template fallback…"
+            )
+            screenshot = _show_desktop_and_capture()
+            template_coords = try_template_fallback(
+                screenshot,
+                grounding_query,
+                save_annotated_to=annotated_path,
+            )
+            if template_coords is not None:
+                x, y = template_coords
+                set_cached_coords(grounding_query, x, y)
+                try:
+                    open_notepad(x, y)
+                    launched = True
+                except TimeoutError:
+                    logger.error(
+                        "Template match at (%d, %d) did not open Notepad.", x, y
+                    )
 
         if not launched:
             logger.error(
